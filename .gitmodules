@@ -1,0 +1,3 @@
+[submodule "generic_embedded"]
+	path = generic_embedded
+	url = https://github.com/pellepl/generic_embedded

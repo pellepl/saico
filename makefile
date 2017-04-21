@@ -15,10 +15,11 @@ toolprefix = arm-none-eabi
 toolversion = 6.1.0
 sourcedir = src
 builddir = build
-#basetoolsdir = /usr/local/gcc/${toolprefix}-toolchain-gcc-${toolversion}-hardfloat
-basetoolsdir = /home/petera/toolchain/${toolprefix}-toolchain-gcc-${toolversion}-hardfloat
+basetoolsdir = /usr/local/gcc/${toolprefix}-toolchain-gcc-${toolversion}-hardfloat
+#basetoolsdir = /home/petera/toolchain/${toolprefix}-toolchain-gcc-${toolversion}-hardfloat
 tools = ${basetoolsdir}/bin
-sdk_dir = ../STM32Cube_FW_F7_V1.6.0
+#sdk_dir = ../STM32Cube_FW_F7_V1.6.0
+sdk_dir = ../../poo/STM32Cube_FW_F7_V1.6.0
 flashscript = flash.script
 
 sdk = stm32f7cube
@@ -55,7 +56,7 @@ MKDIR = mkdir -p
 LD_SCRIPT = arm.ld
 CFLAGS =  $(INC) $(FLAGS) 
 CFLAGS += -mcpu=cortex-m7 -mno-thumb-interwork -mthumb -mabi=aapcs
-CFLAGS += -Wall -Werror -Os -g3
+CFLAGS += -Wall -Werror -O3 -g3
 CFLAGS += -gdwarf-2 -Wno-packed-bitfield-compat -Wno-unused-function
 CFLAGS += -mfloat-abi=hard -mfpu=fpv4-sp-d16
 CFLAGS += -ffunction-sections -fdata-sections -fno-strict-aliasing
@@ -92,6 +93,7 @@ CFILES		+= system_stm32f7xx.c
 CFILES		+= main.c
 CFILES		+= app.c
 CFILES		+= sai.c
+CFILES		+= dac.c
 
 INC			+= -I./${sdk}/Drivers/CMSIS/Device/ST/STM32F7xx/Include
 INC			+= -I./${sdk}/Drivers/CMSIS/Include

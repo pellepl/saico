@@ -25,17 +25,11 @@ static void clock_config(void) {
   RCC_OscInitStruct.PLL.PLLQ = 9;
 
   ret = HAL_RCC_OscConfig(&RCC_OscInitStruct);
-  if(ret != HAL_OK)
-  {
-    while(1) { ; }
-  }
+  ASSERT(ret == HAL_OK);
 
   /* Activate the OverDrive to reach the 216 MHz Frequency */
   ret = HAL_PWREx_EnableOverDrive();
-  if(ret != HAL_OK)
-  {
-    while(1) { ; }
-  }
+  ASSERT(ret == HAL_OK);
 
   /* Select PLL as system clock source and configure the HCLK, PCLK1 and PCLK2 clocks dividers */
   RCC_ClkInitStruct.ClockType = (RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2);
@@ -45,10 +39,8 @@ static void clock_config(void) {
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
   ret = HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_7);
-  if(ret != HAL_OK)
-  {
-    while(1) { ; }
-  }
+  ASSERT(ret == HAL_OK);
+  (void)ret;
 }
 
 volatile bool handling_uart = FALSE;
@@ -152,8 +144,7 @@ static void setup(void) {
   app_init();
 
   while (1) {
-    while (TASK_tick())
-      ;
+    while (TASK_tick());
     __WFI();
   }
 }
@@ -176,9 +167,11 @@ void SysTick_Handler(void) {
 CLI_EXTERN_MENU(system)
 #endif
 CLI_EXTERN_MENU(sai)
+CLI_EXTERN_MENU(dac)
 
 CLI_MENU_START_MAIN
 CLI_SUBMENU(sai, "sai", "SAI submenu")
+CLI_SUBMENU(dac, "dac", "DAC submenu")
 #if CONFIG_CLI_SYS_OFF == 0
 CLI_SUBMENU(system, "sys", "SYSTEM submenu")
 # endif

@@ -10,6 +10,7 @@
 
 #include "app.h"
 #include "taskq.h"
+#include "dac.h"
 
 
 static task_timer led_timer1;
@@ -29,6 +30,8 @@ void app_init(void) {
   // create led blink timer
   led_task = TASK_create(led_blinky_on, TASK_STATIC);
   TASK_start_timer(led_task, &led_timer1, 1, NULL, 0, 1000, "led1");
+
+  dac_init();
 }
 
 

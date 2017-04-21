@@ -10,6 +10,7 @@
 
 #include "system.h"
 
+// SAI1_A DMA2 Channel0 Stream3
 #define PORT_SAI_A_FS     GPIOE
 #define PIN_SAI_A_FS      GPIO_PIN_4
 #define ALT_SAI_A_FS      GPIO_AF6_SAI1
@@ -22,7 +23,7 @@
 #define PORT_SAI_A_MCLK   GPIOE
 #define PIN_SAI_A_MCLK    GPIO_PIN_2
 #define ALT_SAI_A_MCLK    GPIO_AF6_SAI1
-
+// SAI1_B DMA2 Channel1 Stream4
 #define PORT_SAI_B_FS     GPIOF
 #define PIN_SAI_B_FS      GPIO_PIN_9
 #define ALT_SAI_B_FS      GPIO_AF6_SAI1

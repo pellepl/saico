@@ -9,12 +9,14 @@
 #include "sai.h"
 #include "miniutils.h"
 #include "cli.h"
+#include "taskq.h"
+#include "dac.h"
 
 #define SAI_A       SAI1_Block_A
 #define SAI_B       SAI1_Block_B
 
-#define TX_BUF_SIZE   16384
-#define RX_BUF_SIZE   16384
+#define TX_BUF_SIZE   16*512
+#define RX_BUF_SIZE   16*512
 
 SAI_HandleTypeDef sai_h_A;
 SAI_HandleTypeDef sai_h_B;
@@ -22,11 +24,20 @@ DMA_HandleTypeDef dma_h_A;
 DMA_HandleTypeDef dma_h_B;
 
 
-u16_t tx_buf[TX_BUF_SIZE];
-u16_t rx_buf[RX_BUF_SIZE];
+s16_t tx_buf[TX_BUF_SIZE];
+s16_t rx_buf[RX_BUF_SIZE];
 static bool txing = FALSE;
+static bool dump_rx_raw = FALSE;
+static bool analyze_rx_pend = FALSE;
+volatile static bool do_dac_sync = FALSE;
+static task *analyze_rx_task;
+static bool slot_find_activity = FALSE;
+static bool slot_show_activity = FALSE;
+static u32_t slot_energy[16];
 
-static void sai_set_master_freq(u32_t target_f_khz, u32_t *actual_f_khz) {
+static void analyze_rx_task_fn(u32_t is_half, void *ignore_p);
+
+static void sai_set_master_freq(u32_t target_f_khz, u32_t *actual_f_hz) {
   RCC_PeriphCLKInitTypeDef saiclk;
 
   const uint32_t multiplier = 1000UL; // As we're running on SAI_CLK on 1MHz
@@ -34,15 +45,15 @@ static void sai_set_master_freq(u32_t target_f_khz, u32_t *actual_f_khz) {
   // 2  <=   PLLSAIQ  <= 15
   // 1  <= PLLSAIDivQ <= 32
   // freq = 1MHz * PLLSAIIN / PLLSAIQ / PLLSAIDivQ
-  u32_t min_err = 0xffffffff;
+  s32_t min_err = 0x7fffffff;
   u32_t sain, saiq, divq;
   u32_t cand_sain = 0, cand_saiq = 0, cand_divq = 0;
   // this is the unacademic way to solve this - thank god for computers
   for (sain = 50; sain <= 432; sain++) {
     for (saiq = 2; saiq <= 15; saiq++) {
       for (divq = 1; divq <= 32; divq++) {
-        u32_t freq = (multiplier * sain) / (saiq * divq);
-        s32_t err = (s32_t)freq - (s32_t)target_f_khz;
+        u32_t freq = (multiplier * 1000L * sain) / (saiq * divq);
+        s32_t err = (s32_t)freq - (s32_t)target_f_khz * 1000L;
         if (ABS(err) < min_err) {
           min_err = ABS(err);
           cand_sain = sain;
@@ -58,8 +69,8 @@ static void sai_set_master_freq(u32_t target_f_khz, u32_t *actual_f_khz) {
   saiclk.PLLSAI.PLLSAIQ = cand_saiq;
   saiclk.PLLSAIDivQ  = cand_divq;
   ASSERT(HAL_RCCEx_PeriphCLKConfig(&saiclk) == HAL_OK);
-  if (actual_f_khz) {
-    *actual_f_khz = multiplier * cand_sain / (cand_saiq * cand_divq);
+  if (actual_f_hz) {
+    *actual_f_hz = multiplier * 1000 * cand_sain / (cand_saiq * cand_divq);
   }
 }
 
@@ -67,26 +78,26 @@ static void sai_config_default(SAI_HandleTypeDef *sai_h_x, bool tx) {
   __HAL_SAI_DISABLE(sai_h_x);
 
   sai_h_x->Init.AudioMode = tx ? SAI_MODEMASTER_TX : SAI_MODEMASTER_RX;
-  sai_h_x->Init.Synchro = tx ? SAI_SYNCHRONOUS : SAI_ASYNCHRONOUS; // TODO
-  sai_h_x->Init.OutputDrive = tx ? SAI_OUTPUTDRIVE_ENABLE : SAI_OUTPUTDRIVE_DISABLE; // TODO
+  sai_h_x->Init.Synchro = tx ? SAI_SYNCHRONOUS : SAI_ASYNCHRONOUS;
+  sai_h_x->Init.OutputDrive = SAI_OUTPUTDRIVE_ENABLE; //tx ? SAI_OUTPUTDRIVE_ENABLE : SAI_OUTPUTDRIVE_DISABLE; // TODO
   sai_h_x->Init.NoDivider = SAI_MASTERDIVIDER_DISABLE;
   sai_h_x->Init.FIFOThreshold = SAI_FIFOTHRESHOLD_1QF;
   sai_h_x->Init.AudioFrequency = SAI_AUDIO_FREQUENCY_8K;
   sai_h_x->Init.Protocol = SAI_FREE_PROTOCOL;
-  sai_h_x->Init.DataSize = SAI_DATASIZE_8;
+  sai_h_x->Init.DataSize = SAI_DATASIZE_16;
   sai_h_x->Init.FirstBit = SAI_FIRSTBIT_MSB;
-  sai_h_x->Init.ClockStrobing = SAI_CLOCKSTROBING_FALLINGEDGE;
+  sai_h_x->Init.ClockStrobing = SAI_CLOCKSTROBING_RISINGEDGE;
 
   sai_h_x->FrameInit.FrameLength = 256;
   sai_h_x->FrameInit.ActiveFrameLength = 16;
   sai_h_x->FrameInit.FSDefinition = SAI_FS_CHANNEL_IDENTIFICATION;
-  sai_h_x->FrameInit.FSPolarity = SAI_FS_ACTIVE_LOW;
+  sai_h_x->FrameInit.FSPolarity = SAI_FS_ACTIVE_HIGH;
   sai_h_x->FrameInit.FSOffset = SAI_FS_BEFOREFIRSTBIT;
 
   sai_h_x->SlotInit.FirstBitOffset = 0;
   sai_h_x->SlotInit.SlotSize = SAI_SLOTSIZE_DATASIZE;
-  sai_h_x->SlotInit.SlotNumber = 2;
-  sai_h_x->SlotInit.SlotActive = SAI_SLOTACTIVE_ALL; //(SAI_SLOTACTIVE_0 | SAI_SLOTACTIVE_1);
+  sai_h_x->SlotInit.SlotNumber = 16;
+  sai_h_x->SlotInit.SlotActive = SAI_SLOTACTIVE_ALL;
 
   ASSERT(HAL_SAI_Init(sai_h_x) == HAL_OK);
 
@@ -186,12 +197,18 @@ void sai_init(void) {
   HAL_NVIC_SetPriority(DMA2_Stream4_IRQn, 0x01, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream4_IRQn);
 
-
-
   // Other
-
-  memset(tx_buf,0x5a,sizeof(tx_buf));
+  int i;
+  for (i = 0; i < TX_BUF_SIZE; i++) {
+    u8_t v = ((i&0xf) + 1);
+    tx_buf[i] = (v == 0x10 ? 0 : v) * 0x1110;
+  }
   memset(rx_buf,0x00,sizeof(rx_buf));
+  analyze_rx_task = TASK_create(analyze_rx_task_fn, TASK_STATIC);
+  analyze_rx_pend = FALSE;
+  slot_find_activity = TRUE; // TODO
+  slot_show_activity = FALSE;
+  memset(slot_energy, 0, sizeof(slot_energy));
 }
 
 void DMA2_Stream3_IRQHandler(void) {
@@ -211,6 +228,43 @@ static void sai_tx_data(void) {
   HAL_SAI_Receive_DMA(&sai_h_B, (u8_t *)rx_buf, RX_BUF_SIZE);
 }
 
+static void analyze_rx_task_fn(u32_t is_half, void *ignore_p) {
+  if (dump_rx_raw && is_half) {
+    int i;
+    for (i = 0; i < 16; i++) {
+      print("%04x ", rx_buf[i+16*1]);
+    }
+    print("\n");
+  }
+  if (slot_find_activity) {
+    s16_t *rx = &rx_buf[is_half ? 0 : RX_BUF_SIZE/2];
+    int i, j;
+    for (i = 16; i < RX_BUF_SIZE/2-16; i += 16) {
+      for (j = 0; j < 16; j++) {
+        s16_t a = rx[i+j];
+        s16_t b = rx[i+j-16];
+        s16_t d = a-b;
+        slot_energy[j] += ABS(d);
+      }
+    }
+    if (is_half == 0) {
+      if (slot_show_activity) {
+        for (i = 0; i < 16; i++) {
+          u32_t e = slot_energy[i] / (RX_BUF_SIZE / 16);
+          if (e < 10) {
+            print("---- ");
+          } else {
+            print("%-4x ",  e);
+          }
+        }
+        print("\n");
+      }
+      memset(slot_energy, 0, sizeof(slot_energy));
+    }
+  }
+  analyze_rx_pend = FALSE;
+}
+
 void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
   //print("tx\n");
 }
@@ -219,143 +273,79 @@ void HAL_SAI_TxHalfCpltCallback(SAI_HandleTypeDef *hsai) {
 }
 void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai) {
   //print("rx\n");
+  if (do_dac_sync) {
+    dac_sync();
+    do_dac_sync = FALSE;
+  }
+  if (!analyze_rx_pend) {
+    analyze_rx_pend = TRUE;
+    TASK_run(analyze_rx_task, 0, NULL);
+  }
 }
 void HAL_SAI_RxHalfCpltCallback(SAI_HandleTypeDef *hsai) {
   //print("rx half\n");
-  printbuf(IOSTD, (u8_t *)rx_buf, 16);
+  if (!analyze_rx_pend) {
+    analyze_rx_pend = TRUE;
+    TASK_run(analyze_rx_task, 1, NULL);
+  }
 }
 
-/*      HAL_SAI_DMAPause(&sai_h_A); \
-      HAL_SAI_DMAPause(&sai_h_A); \*/
-#define PRE do {\
+#define _STRSET(x,y,z) x.y = z
+#define SAI_CFG(__what, __set) do {\
     __HAL_SAI_DISABLE(&sai_h_A); __HAL_SAI_DISABLE(&sai_h_B); \
     if (txing) { \
       HAL_SAI_DMAStop(&sai_h_A); \
       HAL_SAI_DMAStop(&sai_h_B); \
     } \
-} while (0)
-/*   HAL_SAI_DMAResume(&sai_h_A); \
-   HAL_SAI_DMAResume(&sai_h_A); \ */
-#define POST  do {\
+    _STRSET(sai_h_A, __what, __set); \
+    _STRSET(sai_h_B, __what, __set); \
+    ASSERT(HAL_SAI_Init(&sai_h_A) == HAL_OK);\
+    ASSERT(HAL_SAI_Init(&sai_h_B) == HAL_OK);\
     __HAL_SAI_ENABLE(&sai_h_A); __HAL_SAI_ENABLE(&sai_h_B); \
     if (txing) { \
       HAL_SAI_Transmit_DMA(&sai_h_A, (u8_t *)tx_buf, TX_BUF_SIZE); \
       HAL_SAI_Receive_DMA(&sai_h_B, (u8_t *)rx_buf, RX_BUF_SIZE); \
     } \
-} while (0);
+} while(0)
 
 static void sai_set_audio_freq(u32_t x) {
-  PRE;
-  sai_h_A.Init.AudioFrequency = x;
-  sai_h_B.Init.AudioFrequency = x;
-  ASSERT(HAL_SAI_Init(&sai_h_A) == HAL_OK);
-  ASSERT(HAL_SAI_Init(&sai_h_B) == HAL_OK);
-  POST;
+  SAI_CFG(Init.AudioFrequency, x);
 }
-
 static void sai_set_datasize(u32_t x) {
-  PRE;
-  sai_h_A.Init.DataSize = x;
-  sai_h_B.Init.DataSize = x;
-  ASSERT(HAL_SAI_Init(&sai_h_A) == HAL_OK);
-  ASSERT(HAL_SAI_Init(&sai_h_B) == HAL_OK);
-  POST;
+  SAI_CFG(Init.DataSize, x);
 }
-
 static void sai_set_firstbit(u32_t x) {
-  PRE;
-  sai_h_A.Init.FirstBit = x;
-  sai_h_B.Init.FirstBit = x;
-  ASSERT(HAL_SAI_Init(&sai_h_A) == HAL_OK);
-  ASSERT(HAL_SAI_Init(&sai_h_B) == HAL_OK);
-  POST;
+  SAI_CFG(Init.FirstBit, x);
 }
-
 static void sai_set_clockstrobe(u32_t x) {
-  PRE;
-  sai_h_A.Init.ClockStrobing = x;
-  sai_h_B.Init.ClockStrobing = x;
-  ASSERT(HAL_SAI_Init(&sai_h_A) == HAL_OK);
-  ASSERT(HAL_SAI_Init(&sai_h_B) == HAL_OK);
-  POST;
+  SAI_CFG(Init.ClockStrobing, x);
 }
-
 static void sai_set_frame_length(u32_t x) {
-  PRE;
-  sai_h_A.FrameInit.FrameLength = x;
-  sai_h_B.FrameInit.FrameLength = x;
-  ASSERT(HAL_SAI_Init(&sai_h_A) == HAL_OK);
-  ASSERT(HAL_SAI_Init(&sai_h_B) == HAL_OK);
-  POST;
+  SAI_CFG(FrameInit.FrameLength, x);
 }
-
 static void sai_set_frame_active(u32_t x) {
-  PRE;
-  sai_h_A.FrameInit.ActiveFrameLength = x;
-  sai_h_B.FrameInit.ActiveFrameLength = x;
-  ASSERT(HAL_SAI_Init(&sai_h_A) == HAL_OK);
-  ASSERT(HAL_SAI_Init(&sai_h_B) == HAL_OK);
-  POST;
+  SAI_CFG(FrameInit.ActiveFrameLength, x);
 }
-
 static void sai_set_frame_def(u32_t x) {
-  PRE;
-  sai_h_A.FrameInit.FSDefinition = x;
-  sai_h_B.FrameInit.FSDefinition = x;
-  ASSERT(HAL_SAI_Init(&sai_h_A) == HAL_OK);
-  ASSERT(HAL_SAI_Init(&sai_h_B) == HAL_OK);
-  POST;
+  SAI_CFG(FrameInit.FSDefinition, x);
 }
-
 static void sai_set_frame_pol(u32_t x) {
-  PRE;
-  sai_h_A.FrameInit.FSPolarity = x;
-  sai_h_B.FrameInit.FSPolarity = x;
-  ASSERT(HAL_SAI_Init(&sai_h_A) == HAL_OK);
-  ASSERT(HAL_SAI_Init(&sai_h_B) == HAL_OK);
-  POST;
+  SAI_CFG(FrameInit.FSPolarity, x);
 }
-
 static void sai_set_frame_offs(u32_t x) {
-  PRE;
-  sai_h_A.FrameInit.FSOffset = x;
-  sai_h_B.FrameInit.FSOffset = x;
-  ASSERT(HAL_SAI_Init(&sai_h_A) == HAL_OK);
-  ASSERT(HAL_SAI_Init(&sai_h_B) == HAL_OK);
-  POST;
+  SAI_CFG(FrameInit.FSOffset, x);
 }
-
 static void sai_set_slot_bitoffset(u32_t x) {
-  PRE;
-  sai_h_A.SlotInit.FirstBitOffset = x;
-  sai_h_B.SlotInit.FirstBitOffset = x;
-  ASSERT(HAL_SAI_Init(&sai_h_A) == HAL_OK);
-  ASSERT(HAL_SAI_Init(&sai_h_B) == HAL_OK);
-  POST;
+  SAI_CFG(SlotInit.FirstBitOffset, x);
 }
 static void sai_set_slot_size(u32_t x) {
-  PRE;
-  sai_h_A.SlotInit.SlotSize = x;
-  sai_h_B.SlotInit.SlotSize = x;
-  ASSERT(HAL_SAI_Init(&sai_h_A) == HAL_OK);
-  ASSERT(HAL_SAI_Init(&sai_h_B) == HAL_OK);
-  POST;
+  SAI_CFG(SlotInit.SlotSize, x);
 }
 static void sai_set_slot_active(u32_t x) {
-  PRE;
-  sai_h_A.SlotInit.SlotActive = x;
-  sai_h_B.SlotInit.SlotActive = x;
-  ASSERT(HAL_SAI_Init(&sai_h_A) == HAL_OK);
-  ASSERT(HAL_SAI_Init(&sai_h_B) == HAL_OK);
-  POST;
+  SAI_CFG(SlotInit.SlotActive, x);
 }
-static void sai_set_slot_nbr(u32_t x) {
-  PRE;
-  sai_h_A.SlotInit.SlotNumber = x;
-  sai_h_B.SlotInit.SlotNumber = x;
-  ASSERT(HAL_SAI_Init(&sai_h_A) == HAL_OK);
-  ASSERT(HAL_SAI_Init(&sai_h_B) == HAL_OK);
-  POST;
+static void sai_set_slot_count(u32_t x) {
+  SAI_CFG(SlotInit.SlotNumber, x);
 }
 
 
@@ -427,7 +417,7 @@ static void print_sai_cfg(void) {
   case SAI_SLOTSIZE_32B:      print("32b\n");  break;
   default:                    print("???\n");  break;
   }
-  print("slot number:   %d\n", sai_h_A.SlotInit.SlotNumber);
+  print("nbr of slots:  %d\n", sai_h_A.SlotInit.SlotNumber);
   print("active slots:  %016b\n", sai_h_A.SlotInit.SlotActive);
 }
 
@@ -452,7 +442,7 @@ static int cli_sai_master_freq(u32_t argc, u32_t freq) {
   }
   u32_t actual;
   sai_set_master_freq(freq, &actual);
-  print("actual frequency %dkHz\n", actual);
+  print("actual frequency %dHz\n", actual);
   return CLI_OK;
 }
 
@@ -568,7 +558,7 @@ static int cli_sai_frame_active(u32_t argc, u32_t l) {
   if (argc != 1) {
     l = 16;
   }
-  if (l < 1 || l > 127) return CLI_ERR_PARAM;
+  if (l < 1 || l > 128) return CLI_ERR_PARAM;
   sai_set_frame_active(l);
   print_sai_cfg();
   return CLI_OK;
@@ -591,7 +581,7 @@ static int cli_sai_frame_definition(u32_t argc, char *def) {
 
 static int cli_sai_frame_polarity(u32_t argc, char *def) {
   if (argc != 1) {
-    def = "low";
+    def = "high";
   }
   if (0 == strcmp("high", def)) {
     sai_set_frame_pol(SAI_FS_ACTIVE_LOW);
@@ -646,12 +636,12 @@ static int cli_sai_slot_size(u32_t argc, char *def) {
   return CLI_OK;
 }
 
-static int cli_sai_slot_nbr(u32_t argc, u32_t l) {
+static int cli_sai_nbr_of_slots(u32_t argc, u32_t l) {
   if (argc != 1) {
-    l = 0;
+    l = 16;
   }
   if (l < 1 || l > 16) return CLI_ERR_PARAM;
-  sai_set_slot_nbr(l);
+  sai_set_slot_count(l);
   print_sai_cfg();
   return CLI_OK;
 }
@@ -668,6 +658,39 @@ static int cli_sai_slot_active(u32_t argc, u32_t l) {
 
 static int cli_sai_tx(u32_t argc) {
   sai_tx_data();
+  return CLI_OK;
+}
+
+static int cli_sai_dump_rx(u32_t argc, char *x) {
+  if (argc != 1) {
+    x = "on";
+  }
+  if (0 == strcmp("on", x)) {
+    dump_rx_raw = TRUE;
+  } else if (0 == strcmp("off", x)) {
+    dump_rx_raw = FALSE;
+  } else {
+    return CLI_ERR_PARAM;
+  }
+  return CLI_OK;
+}
+
+static int cli_sai_dump_energy(u32_t argc, char *x) {
+  if (argc != 1) {
+    x = "on";
+  }
+  if (0 == strcmp("on", x)) {
+    slot_show_activity = TRUE;
+  } else if (0 == strcmp("off", x)) {
+    slot_show_activity = FALSE;
+  } else {
+    return CLI_ERR_PARAM;
+  }
+  return CLI_OK;
+}
+
+static int cli_sai_dacsync(u32_t argc) {
+  do_dac_sync = TRUE;
   return CLI_OK;
 }
 
@@ -690,9 +713,12 @@ CLI_FUNC("framepol", cli_sai_frame_polarity, "set frame polarity (high|low)")
 CLI_FUNC("frameoffs", cli_sai_frame_offset, "set frame offset (b4 = before first bit|at = at first bit)")
 CLI_FUNC("slotoffs", cli_sai_slot_bitoffset, "set slot first bit offset (0-24)")
 CLI_FUNC("slotsize", cli_sai_slot_size, "set slot size (16b|32b|data)")
-CLI_FUNC("slotnbr", cli_sai_slot_nbr, "set slot nbr (1-16)")
+CLI_FUNC("slotnbr", cli_sai_nbr_of_slots, "set nbr of slots (1-16)")
 CLI_FUNC("slotactive", cli_sai_slot_active, "set active slot mask (0bxxxxxxxxxxxxxxxx)")
-CLI_FUNC("tx", cli_sai_tx, "transmit data")
+CLI_FUNC("tx", cli_sai_tx, "start transmit/receive data")
+CLI_FUNC("dumprx", cli_sai_dump_rx, "dump parts of raw slot data (on|off)")
+CLI_FUNC("dumpe", cli_sai_dump_energy, "dump slot signal energy (on|off)")
+CLI_FUNC("dacsync", cli_sai_dacsync, "tries to sync DAC stream")
 CLI_FUNC("config", cli_sai_config, "prints SAI config")
 CLI_MENU_END
 
