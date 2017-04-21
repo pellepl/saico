@@ -1,0 +1,27 @@
+// Auto generated file, do not tamper
+#ifdef INCLUDE_CONFIG_HEADER
+#ifndef _CONFIG_HEADER_H
+#define _CONFIG_HEADER_H
+#define ARCH_CORTEX
+#define PROC_FAMILY_STM32
+#define PROC_STM32F7
+#define CONFIG_SYS_TIME_64_BIT
+#define CONFIG_MEMOPS
+#define CONFIG_VARCALL
+#define CONFIG_IO
+#define CONFIG_CRC
+#define CONFIG_UART
+#define CONFIG_MINIUTILS
+#define CONFIG_TASK_QUEUE
+#define CONFIG_RINGBUFFER
+#define CONFIG_CLI
+#define CONFIG_CLI_BUS_OFF
+#define CONFIG_CLI_DEV_OFF
+#define CONFIG_CLI_GPIO_OFF
+#define CONFIG_CLI_RTC_OFF
+#define CONFIG_CLI_HMC5883L_OFF
+#define CONFIG_CLI_ADXL345_OFF
+#define CONFIG_CLI_M24M01_OFF
+#define CONFIG_CLI_ITG3200_OFF
+#endif
+#endif
