@@ -239,7 +239,7 @@ static void analyze_rx_task_fn(u32_t is_half, void *ignore_p) {
   if (slot_find_activity) {
     s16_t *rx = &rx_buf[is_half ? 0 : RX_BUF_SIZE/2];
     int i, j;
-    for (i = 16; i < RX_BUF_SIZE/2-16; i += 16) {
+    for (i = 16; i < RX_BUF_SIZE/2; i += 16) {
       for (j = 0; j < 16; j++) {
         s16_t a = rx[i+j];
         s16_t b = rx[i+j-16];
