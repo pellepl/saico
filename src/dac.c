@@ -18,7 +18,7 @@ static void setup_timer(void) {
   __HAL_RCC_TIM6_CLK_ENABLE();
 
   tim_h.Instance = TIM6;
-  tim_h.Init.Period            = (SYS_CPU_FREQ / (2) / 8000) - 1;       // 0..ffff
+  tim_h.Init.Period            = (SYS_CPU_FREQ / (2) / AUDIO_FREQ) - 1;       // 0..ffff
   tim_h.Init.Prescaler         = 0x0000;       // 0..ffff
   tim_h.Init.ClockDivision     = 0;
   tim_h.Init.CounterMode       = TIM_COUNTERMODE_UP;
@@ -84,7 +84,8 @@ void dac_stop(void) {
 }
 
 void dac_sync(void) {
-  tim_h.Instance->CNT = 0;
+  // this is supposed to trigger the dac dma directly
+  tim_h.Instance->CNT = tim_h.Instance->ARR-1;
 }
 
 void dac_deinit(void) {
@@ -123,7 +124,7 @@ int cli_dac_stop(u32_t argc) {
 int cli_dac_freq(u32_t argc, u32_t x) {
   u32_t period = (SYS_CPU_FREQ / (2) / x) - 1;
   if (period > 0xffff || period < 1000) {
-    print("out of range\n");
+    print("frequency out of range\n");
     return CLI_OK;
   }
   tim_h.Instance->ARR = period;
@@ -148,7 +149,7 @@ int cli_dac_timpsc(u32_t argc, u32_t x) {
 CLI_MENU_START(dac)
 CLI_FUNC("test", cli_dac_test, "send test signal to DAC")
 CLI_FUNC("stop", cli_dac_stop, "stop DAC")
-CLI_FUNC("freq", cli_dac_freq, "set frequency in Hz(x)")
+CLI_FUNC("freq", cli_dac_freq, "set frequency in Hz (x)")
 CLI_FUNC("timper", cli_dac_timper, "set timer period (0-ffff)")
 CLI_FUNC("timpsc", cli_dac_timpsc, "set timer prescaler (0-ffff)")
 CLI_MENU_END

@@ -7,6 +7,8 @@
 #include "stm32f7xx_hal.h"
 
 
+#define AUDIO_FREQ              8000
+
 // enable uart
 #define CONFIG_UART2
 #define CONFIG_UART2_PORT       0
