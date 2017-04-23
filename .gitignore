@@ -9,4 +9,5 @@ build-number.txt
 config_header.h
 *~
 _flash.script
+stm32f7cube
 
