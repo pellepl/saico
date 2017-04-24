@@ -115,7 +115,7 @@ static void sai_config_default(SAI_HandleTypeDef *sai_h_x, bool tx) {
 
   sai_h_x->FrameInit.FrameLength = 256;
   sai_h_x->FrameInit.ActiveFrameLength = 16;
-  sai_h_x->FrameInit.FSDefinition = SAI_FS_CHANNEL_IDENTIFICATION;
+  sai_h_x->FrameInit.FSDefinition = SAI_FS_STARTFRAME;
   sai_h_x->FrameInit.FSPolarity = SAI_FS_ACTIVE_HIGH;
   sai_h_x->FrameInit.FSOffset = SAI_FS_BEFOREFIRSTBIT;
 
@@ -286,6 +286,42 @@ static void sai_tx_data(void) {
   txing = TRUE;
 }
 
+static void buffer_update(bool is_half) {
+  int i,j;
+  // SAI data (TX)
+  s16_t *sai_dst = (s16_t *)(&tx_buf[is_half ? 0 : (TX_BUF_SIZE / 2)]);
+  for (j = 0; j < SAI_SLOTS; j++) {
+    //const u32_t inc = 0x8;
+    const u32_t inc = slot_test_perinc[j];
+    u32_t period = slot_test_perval[j];
+    for (i = 0; i < TX_BUF_SIZE/2; i += SAI_SLOTS) {
+      s32_t audio =
+          //sin_table((((period>>8) * PI_TRIG_T)/AUDIO_FREQ) >> (12-8));
+          ((s32_t)((period>>12) % AUDIO_FREQ) < AUDIO_FREQ/2 ? -0x7fff : 0x7fff);
+      sai_dst[i+j] = ((s32_t)audio * (s32_t)volume) >> 8;
+      period += inc;
+    }
+    if (period > AUDIO_FREQ << 12) {
+      period -= AUDIO_FREQ << 12;
+    }
+    slot_test_perval[j] = period;
+  }
+
+  volume -= 0x100 / (BUFFER_HZ * 2);
+  if (volume < 0) volume = 0x100;
+
+  // DAC data (RX)
+  s8_t *dac_src = (s8_t *)(&rx_buf[is_half ? 0 : (RX_BUF_SIZE / 2)]);
+  if (dac_slot_msb) dac_src++;
+  dac_src += dac_slot * SAI_SLOT_BYTES;
+  u8_t *dac_dst = &dac_buf[is_half ? 0 : (DAC_BUF_SIZE / 2)];
+  for (i = 0; i < DAC_BUF_SIZE/2; i++) {
+    // dac_src (sai data) signed, dac_dst (dac data) unsigned
+    *dac_dst++ = (u8_t)((s8_t)*dac_src + (u8_t)0x80);
+    dac_src += SAI_SLOT_BYTES * SAI_SLOTS;
+  }
+}
+
 static void analyze_rx_task_fn(u32_t is_half, void *ignore_p) {
   int i, j;
   if (dump_rx_raw && is_half) {
@@ -316,44 +352,12 @@ static void analyze_rx_task_fn(u32_t is_half, void *ignore_p) {
       memset(slot_energy, 0, sizeof(slot_energy));
     }
   }
+
+  buffer_update(is_half);
+
   analyze_rx_pend = FALSE;
 }
 
-static void buffer_update(bool is_half) {
-  int i,j;
-  // SAI data (TX)
-  s16_t *sai_dst = (s16_t *)(&tx_buf[is_half ? 0 : (TX_BUF_SIZE / 2)]);
-  for (j = 0; j < SAI_SLOTS; j++) {
-    //const u32_t inc = 0x8;
-    const u32_t inc = slot_test_perinc[j];
-    u32_t period = slot_test_perval[j];
-    for (i = 0; i < TX_BUF_SIZE/2; i += SAI_SLOTS) {
-      sai_dst[i + j] =
-          (sin_table((((period>>8) * PI_TRIG_T)/AUDIO_FREQ) >> (12-8)) * volume) / 0x100;
-          //((period>>12) % AUDIO_FREQ) < AUDIO_FREQ/2 ? 0xc0c0 : 0x4040;
-          //((period>>12) % AUDIO_FREQ) < AUDIO_FREQ/2 ? 0x7f7f : 0x8080;
-      period += inc;
-    }
-    if (period > AUDIO_FREQ << 12) {
-      period -= AUDIO_FREQ << 12;
-    }
-    slot_test_perval[j] = period;
-  }
-
-  volume -= 0x100 / (BUFFER_HZ * 2);
-  if (volume < 0) volume = 0x100;
-
-  // DAC data (RX)
-  s8_t *dac_src = (s8_t *)(&rx_buf[is_half ? 0 : (RX_BUF_SIZE / 2)]);
-  if (dac_slot_msb) dac_src++;
-  dac_src += dac_slot * SAI_SLOT_BYTES;
-  u8_t *dac_dst = &dac_buf[is_half ? 0 : (DAC_BUF_SIZE / 2)];
-  for (i = 0; i < DAC_BUF_SIZE/2; i++) {
-    // dac_src (sai data) signed, dac_dst (dac data) unsigned
-    *dac_dst++ = (u8_t)((s8_t)*dac_src + (u8_t)0x80);
-    dac_src += SAI_SLOT_BYTES * SAI_SLOTS;
-  }
-}
 
 void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
 }
@@ -375,7 +379,7 @@ void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai) {
     do_dac_play = FALSE;
   }
   // move second half of tdm data to second part of dac buffer
-  buffer_update(FALSE);
+  //buffer_update(FALSE);
   if (!analyze_rx_pend) {
     analyze_rx_pend = TRUE;
     TASK_run(analyze_rx_task, FALSE, NULL);
@@ -385,7 +389,7 @@ void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai) {
 }
 void HAL_SAI_RxHalfCpltCallback(SAI_HandleTypeDef *hsai) {
   // move first half of tdm data to first part of dac buffer
-  buffer_update(TRUE);
+  //buffer_update(TRUE);
   if (!analyze_rx_pend) {
     analyze_rx_pend = TRUE;
     TASK_run(analyze_rx_task, TRUE, NULL);
