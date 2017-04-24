@@ -15,11 +15,11 @@ toolprefix = arm-none-eabi
 toolversion = 6.1.0
 sourcedir = src
 builddir = build
-#basetoolsdir = /usr/local/gcc/${toolprefix}-toolchain-gcc-${toolversion}-hardfloat
-basetoolsdir = /home/petera/toolchain/${toolprefix}-toolchain-gcc-${toolversion}-hardfloat
+basetoolsdir = /usr/local/gcc/${toolprefix}-toolchain-gcc-${toolversion}-hardfloat
+#basetoolsdir = /home/petera/toolchain/${toolprefix}-toolchain-gcc-${toolversion}-hardfloat
 tools = ${basetoolsdir}/bin
-sdk_dir = ../STM32Cube_FW_F7_V1.6.0
-#sdk_dir = ../../poo/STM32Cube_FW_F7_V1.6.0
+#sdk_dir = ../STM32Cube_FW_F7_V1.6.0
+sdk_dir = ../../poo/STM32Cube_FW_F7_V1.6.0
 flashscript = flash.script
 
 sdk = stm32f7cube

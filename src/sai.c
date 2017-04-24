@@ -11,6 +11,7 @@
 #include "cli.h"
 #include "taskq.h"
 #include "dac.h"
+#include "trig_q.h"
 
 #define SAI_A             SAI1_Block_A
 #define SAI_B             SAI1_Block_B
@@ -20,22 +21,24 @@
 #define SAI_SLOT_BYTES    2
 #define SAI_FRAME_BITS    (SAI_SLOTS * SAI_SLOT_BITS)
 #define SAI_FRAME_BYTES   (SAI_FRAME_BITS/8)
-#define BUFFER_HZ         16
+#define BUFFER_HZ         10
 #define SAI_SLOT_ENERGY_THRESH    0x40
 
 #define TX_BUF_SIZE       ((SAI_FRAME_BYTES*AUDIO_FREQ)/BUFFER_HZ)
 #define RX_BUF_SIZE       ((SAI_FRAME_BYTES*AUDIO_FREQ)/BUFFER_HZ)
-#define DAC_BUF_SIZE      ((1 * AUDIO_FREQ)/BUFFER_HZ)
+#define DAC_BUF_SIZE      ((2 * AUDIO_FREQ)/BUFFER_HZ)
+#if ((SAI_FRAME_BYTES*AUDIO_FREQ) % BUFFER_HZ != 0)
+#error bad BUFFER_HZ
+#endif
+#if ((1 *AUDIO_FREQ) % BUFFER_HZ != 0)
+#error bad BUFFER_HZ
+#endif
 
 SAI_HandleTypeDef sai_h_A;
 SAI_HandleTypeDef sai_h_B;
 DMA_HandleTypeDef dma_h_A;
 DMA_HandleTypeDef dma_h_B;
 
-
-s16_t tx_buf[TX_BUF_SIZE];
-s16_t rx_buf[RX_BUF_SIZE];
-u8_t dac_buf[DAC_BUF_SIZE];
 
 volatile static bool txing;
 volatile static bool rxing;
@@ -46,9 +49,16 @@ volatile static bool do_dac_play;
 static task *analyze_rx_task;
 static bool slot_find_activity;
 static bool slot_show_activity;
-static u32_t slot_energy[16];
+static u32_t slot_energy[SAI_SLOTS];
 static u8_t dac_slot;
 static bool dac_slot_msb;
+static u32_t slot_test_perinc[SAI_SLOTS];
+static u32_t slot_test_perval[SAI_SLOTS];
+
+static s16_t tx_buf[TX_BUF_SIZE];
+static s16_t rx_buf[RX_BUF_SIZE];
+static u8_t dac_buf[DAC_BUF_SIZE];
+static s16_t volume;
 
 static void analyze_rx_task_fn(u32_t is_half, void *ignore_p);
 
@@ -218,6 +228,19 @@ void sai_init(void) {
     u8_t v = ((i&0xf) + 1);
     tx_buf[i] = (v == 0x10 ? 0 : v) * 0x1110;
   }
+
+#define BASE_FREQ   400
+#define HALFNOTE_16 0x10f39 // 2^(1/12) << 16
+
+  u32_t freq_mul = 0x1000; // frequency has 12 bit precision
+  for (i = 0; i < SAI_SLOTS; i++) {
+    u32_t freq_12 = BASE_FREQ * freq_mul;
+    slot_test_perval[i] = 0;
+    slot_test_perinc[i] = freq_12;
+    print("sl %-2d : inc %d (0x%08x)\n", i, freq_12, freq_12);
+    freq_mul = (freq_mul * HALFNOTE_16) >> 16;
+  }
+
   memset(rx_buf,0x00,sizeof(rx_buf));
   analyze_rx_task = TASK_create(analyze_rx_task_fn, TASK_STATIC);
   txing = FALSE;
@@ -231,6 +254,7 @@ void sai_init(void) {
   dac_slot = 0;
   dac_slot_msb = TRUE;
   memset(slot_energy, 0, sizeof(slot_energy));
+  volume = 0x100;
 }
 
 void DMA2_Stream3_IRQHandler(void) {
@@ -241,13 +265,25 @@ void DMA2_Stream4_IRQHandler(void) {
 }
 
 static void sai_tx_data(void) {
-  if (txing) {
+  int res;
+  txing = FALSE;
+  rxing = FALSE;
+  if (HAL_SAI_GetState(&sai_h_A) == HAL_SAI_STATE_BUSY_TX) {
+    print("stopping tx CALL\n");
     HAL_SAI_DMAStop(&sai_h_A);
+  }
+  if (HAL_SAI_GetState(&sai_h_B) == HAL_SAI_STATE_BUSY_RX) {
+    print("stopping rx CALL\n");
     HAL_SAI_DMAStop(&sai_h_B);
   }
+  res = HAL_SAI_Transmit_DMA(&sai_h_A, (u8_t *)tx_buf, TX_BUF_SIZE);
+  if (res != HAL_OK) print("warn sai_tx_data transmit err %d\n", res);
+  ASSERT(res == HAL_OK);
+  res = HAL_SAI_Receive_DMA(&sai_h_B, (u8_t *)rx_buf, RX_BUF_SIZE);
+  if (res != HAL_OK) print("warn sai_tx_data receive err %d\n", res);
+  ASSERT(res == HAL_OK);
+  HAL_SAI_DMAPause(&sai_h_B);
   txing = TRUE;
-  rxing = FALSE;
-  HAL_SAI_Transmit_DMA(&sai_h_A, (u8_t *)tx_buf, TX_BUF_SIZE);
 }
 
 static void analyze_rx_task_fn(u32_t is_half, void *ignore_p) {
@@ -280,27 +316,53 @@ static void analyze_rx_task_fn(u32_t is_half, void *ignore_p) {
       memset(slot_energy, 0, sizeof(slot_energy));
     }
   }
+  analyze_rx_pend = FALSE;
+}
+
+static void buffer_update(bool is_half) {
+  int i,j;
+  // SAI data (TX)
+  s16_t *sai_dst = (s16_t *)(&tx_buf[is_half ? 0 : (TX_BUF_SIZE / 2)]);
+  for (j = 0; j < SAI_SLOTS; j++) {
+    //const u32_t inc = 0x8;
+    const u32_t inc = slot_test_perinc[j];
+    u32_t period = slot_test_perval[j];
+    for (i = 0; i < TX_BUF_SIZE/2; i += SAI_SLOTS) {
+      sai_dst[i + j] =
+          (sin_table((((period>>8) * PI_TRIG_T)/AUDIO_FREQ) >> (12-8)) * volume) / 0x100;
+          //((period>>12) % AUDIO_FREQ) < AUDIO_FREQ/2 ? 0xc0c0 : 0x4040;
+          //((period>>12) % AUDIO_FREQ) < AUDIO_FREQ/2 ? 0x7f7f : 0x8080;
+      period += inc;
+    }
+    if (period > AUDIO_FREQ << 12) {
+      period -= AUDIO_FREQ << 12;
+    }
+    slot_test_perval[j] = period;
+  }
+
+  volume -= 0x100 / (BUFFER_HZ * 2);
+  if (volume < 0) volume = 0x100;
+
+  // DAC data (RX)
   s8_t *dac_src = (s8_t *)(&rx_buf[is_half ? 0 : (RX_BUF_SIZE / 2)]);
-  if (!dac_slot_msb) dac_src++;
+  if (dac_slot_msb) dac_src++;
   dac_src += dac_slot * SAI_SLOT_BYTES;
-  u8_t *dac_dst = &dac_buf[is_half ? 0 : (DAC_BUF_SIZE/2)];
+  u8_t *dac_dst = &dac_buf[is_half ? 0 : (DAC_BUF_SIZE / 2)];
   for (i = 0; i < DAC_BUF_SIZE/2; i++) {
     // dac_src (sai data) signed, dac_dst (dac data) unsigned
     *dac_dst++ = (u8_t)((s8_t)*dac_src + (u8_t)0x80);
     dac_src += SAI_SLOT_BYTES * SAI_SLOTS;
   }
-
-  analyze_rx_pend = FALSE;
 }
 
 void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai) {
-  if (txing && !rxing) {
-    // start receive data synced with sending data
-    rxing = TRUE;
-    HAL_SAI_Receive_DMA(&sai_h_B, (u8_t *)rx_buf, RX_BUF_SIZE);
-  }
 }
 void HAL_SAI_TxHalfCpltCallback(SAI_HandleTypeDef *hsai) {
+  if (txing && !rxing) {
+    // start receive data synced with sending data
+    HAL_SAI_DMAResume(&sai_h_B);
+    rxing = TRUE;
+  }
 }
 
 void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai) {
@@ -309,22 +371,24 @@ void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai) {
     do_dac_sync = FALSE;
   }
   if (do_dac_play) {
-    dac_start(dac_buf, sizeof(dac_buf));
+    dac_start(dac_buf, DAC_BUF_SIZE);
     do_dac_play = FALSE;
   }
   // move second half of tdm data to second part of dac buffer
+  buffer_update(FALSE);
   if (!analyze_rx_pend) {
     analyze_rx_pend = TRUE;
-    TASK_run(analyze_rx_task, 0, NULL);
+    TASK_run(analyze_rx_task, FALSE, NULL);
   } else {
     print("WARNING: system overload!\n");
   }
 }
 void HAL_SAI_RxHalfCpltCallback(SAI_HandleTypeDef *hsai) {
   // move first half of tdm data to first part of dac buffer
+  buffer_update(TRUE);
   if (!analyze_rx_pend) {
     analyze_rx_pend = TRUE;
-    TASK_run(analyze_rx_task, 1, NULL);
+    TASK_run(analyze_rx_task, TRUE, NULL);
   } else {
     print("WARNING: system overload!\n");
   }
@@ -755,7 +819,7 @@ static int cli_sai_dacslotpart(u32_t argc, char *def) {
 }
 
 static int cli_sai_dacpipe(u32_t argc) {
-  memset(dac_buf, 0x80, sizeof(dac_buf));
+  memset(dac_buf, 0x00, sizeof(dac_buf));
   do_dac_play = TRUE;
   return CLI_OK;
 }

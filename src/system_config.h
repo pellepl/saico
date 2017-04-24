@@ -39,6 +39,8 @@ typedef u16_t system_counter_type;
 #define VALID_DATA(x)      1
 #define VALID_RAM(x)       1
 
+#define CONFIG_TRIGQ_TABLE
+
 #include "miniutils.h"
 
 #endif // _SYSTEM_CONFIG_H

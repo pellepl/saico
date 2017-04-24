@@ -9,6 +9,7 @@
 #define CONFIG_MEMOPS
 #define CONFIG_VARCALL
 #define CONFIG_IO
+#define CONFIG_MATH
 #define CONFIG_CRC
 #define CONFIG_UART
 #define CONFIG_MINIUTILS
