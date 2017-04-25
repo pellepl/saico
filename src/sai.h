@@ -37,5 +37,6 @@
 #define PIN_SAI_B_MCLK    GPIO_PIN_7
 #define ALT_SAI_B_MCLK    GPIO_AF6_SAI1
 
+void sai_init(bool master);
 
 #endif /* SRC_SAI_H_ */
